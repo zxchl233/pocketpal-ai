@@ -24,6 +24,13 @@ export interface CompletionParamMetadata {
   step?: number;
 }
 
+// [patch] Slider-only ceiling for temperature.
+// Validation has no upper bound at all (min >= 0 only); this value exists
+// purely because the native Slider needs a finite maximumValue to
+// position its thumb. Typing a larger number in the text field is still
+// accepted by validation.
+export const TEMPERATURE_SLIDER_MAX = 1000;
+
 export const COMPLETION_PARAMS_METADATA: Partial<
   Record<keyof CompletionParams, CompletionParamMetadata>
 > = {
@@ -37,7 +44,10 @@ export const COMPLETION_PARAMS_METADATA: Partial<
     defaultValue: defaultCompletionParams.n_predict,
   },
   temperature: {
-    validation: {type: 'numeric', min: 0, max: 2, required: true},
+    // [patch] upper bound removed entirely (was 2).
+    // `max` left undefined => validateNumericField only enforces min >= 0.
+    // The slider's own hard cap lives in TEMPERATURE_SLIDER_MAX below.
+    validation: {type: 'numeric', min: 0, required: true},
     defaultValue: defaultCompletionParams.temperature,
     step: 0.01,
   },
