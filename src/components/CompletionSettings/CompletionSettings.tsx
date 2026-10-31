@@ -14,6 +14,7 @@ import {L10nContext} from '../../utils';
 import {t} from '../../locales';
 import {
   COMPLETION_PARAMS_METADATA,
+  TEMPERATURE_SLIDER_MAX,
   validateNumericField,
 } from '../../utils/modelSettings';
 import {CompletionParams} from '../../utils/completionTypes';
@@ -101,6 +102,9 @@ export const CompletionSettings: React.FC<Props> = ({
     const range =
       metadata?.validation.type === 'numeric' ? metadata.validation : undefined;
     const step = stepOf(name);
+    // [patch] temperature has no validation upper bound; the Slider still
+    // needs a finite maximumValue, so give it an explicit wide ceiling.
+    const max = name === 'temperature' ? TEMPERATURE_SLIDER_MAX : range?.max;
 
     return (
       <View style={styles.settingItem}>
@@ -112,7 +116,7 @@ export const CompletionSettings: React.FC<Props> = ({
           value={settings[name] as number}
           onValueChange={value => onChange(name, value)}
           min={range?.min}
-          max={range?.max}
+          max={max}
           step={step}
           precision={Number.isInteger(step) ? 0 : 2}
           debounceMs={300} // Enable debouncing for sliders
