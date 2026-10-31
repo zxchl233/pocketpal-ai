@@ -1,5 +1,6 @@
 name: Build APK (custom)
 
+# 手动触发：Actions 页面 -> Build APK (custom) -> Run workflow
 on:
   workflow_dispatch:
     inputs:
@@ -21,16 +22,20 @@ jobs:
     timeout-minutes: 120
 
     env:
+      # [v2 修复] 上次崩溃根因：llama.rn 的原生 .so 不在 npm tarball 里，
+      # 是靠 postinstall 下载的。上次设 RNLLAMA_SKIP_POSTINSTALL=1
+      # 导致 jniLibs 为空，SoLoader.init 找不到 libllama.so -> UnsatisfiedLinkError。
+      # 这次不跳过，让它正常下载预编译产物。
+      #
+      # 仍然不走源码编译（不需要 Hexagon SDK，省 3GB + 1小时）。
       ORG_GRADLE_PROJECT_rnllamaBuildFromSource: "false"
-      RNLLAMA_SKIP_POSTINSTALL: "1"
       PLUS_STORE_GATE: "false"
 
     steps:
       - name: Maximize build space
         run: |
           df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
-                      /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           df -h /
 
       - name: Checkout
@@ -53,14 +58,30 @@ jobs:
           corepack prepare yarn@1.22.22 --activate || true
           yarn -v
 
-      - name: Cache node_modules
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-${{ runner.os }}-${{ hashFiles('yarn.lock', 'patches/**') }}
-
       - name: Install dependencies
         run: yarn install --frozen-lockfile || yarn install
+
+      # 关键检查：确认预编译 so 真的下载到了。没有就直接失败，
+      # 免得又白等 30 分钟产出一个启动即崩的包。
+      - name: Verify native artifacts (llama.rn)
+        run: |
+          echo "=== 搜索 llama.rn 下的 .so / jniLibs ==="
+          find node_modules/llama.rn -name "*.so" -o -name "jniLibs" -type d 2>/dev/null | head -40
+          echo
+          SO_COUNT=$(find node_modules/llama.rn -name "*.so" 2>/dev/null | wc -l)
+          echo "找到 .so 文件数量: $SO_COUNT"
+          if [ "$SO_COUNT" -eq 0 ]; then
+            echo "::warning::未找到 so，尝试手动触发下载脚本"
+            node node_modules/llama.rn/install/download-native-artifacts.js || true
+            SO_COUNT2=$(find node_modules/llama.rn -name "*.so" 2>/dev/null | wc -l)
+            echo "手动下载后 .so 数量: $SO_COUNT2"
+            if [ "$SO_COUNT2" -eq 0 ]; then
+              echo "::error::llama.rn 没有原生 so 文件，构建会启动即崩。终止。"
+              exit 1
+            fi
+          fi
+          echo "=== arm64-v8a ==="
+          find node_modules/llama.rn -path "*arm64-v8a*" -name "*.so" | head -10
 
       - name: Create .env
         run: |
@@ -96,12 +117,13 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+          key: gradle-v2-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
 
       - name: Build APK
         working-directory: android
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/.gradle
+          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
         run: |
           set -o pipefail
           chmod +x ./gradlew
@@ -110,13 +132,253 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p out
+          find android/app/build/outputs -name "*.apk" -print
           find android/app/build/outputs -name "*.apk" -exec cp {} out/ \;
           ls -lh out/
+
+      # 出包前最后一道保险：确认 APK 里真的含 libllama.so
+      - name: Verify APK contains libllama.so
+        run: |
+          APK=$(find out -name "*.apk" | head -1)
+          echo "检查: $APK"
+          unzip -l "$APK" | grep -i "\.so" | head -20
+          if unzip -l "$APK" | grep -qi "libllama"; then
+            echo "OK: APK 含 libllama.so"
+          else
+            echo "::error::APK 内没有 libllama.so，装上会崩。终止。"
+            exit 1
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pocketpal-apk-temp5
+          name: pocketpal-apk-temp5-v2
+          path: out/*.apk
+          retention-days: 30
+: Build APK (custom)
+
+# 手动触发：Actions 页面 -> Build APK (custom) -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      build_command:
+        description: "Gradle 构建命令"
+        required: true
+        default: "assembleProdRelease"
+        type: choice
+        options:
+          - assembleProdRelease
+          - assembleProdDebug
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # [v2 修复] 上次崩溃根因：llama.rn 的原生 .so 不在 npm tarball 里，
+      # 是靠 postinstall 下载的。上次设 RNLLAMA_SKIP_POSTINSTALL=1
+      # 导致 jniLibs 为空，SoLoader.init 找不到 libllama.so -> UnsatisfiedLinkError。
+      # 这次不跳过，让它正常下载预编译产物。
+      #
+      # 仍然不走源码编译（不需要 Hexagon SDK，省 3GB + 1小时）。
+      ORG_GRADLE_PROJECT_rnllamaBuildFromSource: "false"
+      PLUS_STORE_GATE: "false"
+
+    steps:
+      - name: Maximize build space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.21.0'
+
+      - name: Enable corepack (yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate || true
+          yarn -v
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile || yarn install
+
+      # 关键检查：确认预编译 so 真的下载到了。没有就直接失败，
+      # 免得又白等 30 分钟产出一个启动即崩的包。
+      - name: Verify native artifacts (llama.rn)
+        run: |
+          echo "=== 搜索 llama.rn 下的 .so / jniLibs ==="
+          find node_modules/llama.rn -name "*.so" -o -name "jniLibs" -type d 2>/dev/null | head -40
+          echoname: Build APK (custom)
+
+# 手动触发：Actions 页面 -> Build APK (custom) -> Run workflow
+on:
+  workflow_dispatch:
+    inputs:
+      build_command:
+        description: "Gradle 构建命令"
+        required: true
+        default: "assembleProdRelease"
+        type: choice
+        options:
+          - assembleProdRelease
+          - assembleProdDebug
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # [v2 修复] 上次崩溃根因：llama.rn 的原生 .so 不在 npm tarball 里，
+      # 是靠 postinstall 下载的。上次设 RNLLAMA_SKIP_POSTINSTALL=1
+      # 导致 jniLibs 为空，SoLoader.init 找不到 libllama.so -> UnsatisfiedLinkError。
+      # 这次不跳过，让它正常下载预编译产物。
+      #
+      # 仍然不走源码编译（不需要 Hexagon SDK，省 3GB + 1小时）。
+      ORG_GRADLE_PROJECT_rnllamaBuildFromSource: "false"
+      PLUS_STORE_GATE: "false"
+
+    steps:
+      - name: Maximize build space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.21.0'
+
+      - name: Enable corepack (yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate || true
+          yarn -v
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile || yarn install
+
+      # 关键检查：确认预编译 so 真的下载到了。没有就直接失败，
+      # 免得又白等 30 分钟产出一个启动即崩的包。
+      - name: Verify native artifacts (llama.rn)
+        run: |
+          echo "=== 搜索 llama.rn 下的 .so / jniLibs ==="
+          find node_modules/llama.rn -name "*.so" -o -name "jniLibs" -type d 2>/dev/null | head -40
+          echo
+          SO_COUNT=$(find node_modules/llama.rn -name "*.so" 2>/dev/null | wc -l)
+          echo "找到 .so 文件数量: $SO_COUNT"
+          if [ "$SO_COUNT" -eq 0 ]; then
+            echo "::warning::未找到 so，尝试手动触发下载脚本"
+            node node_modules/llama.rn/install/download-native-artifacts.js || true
+            SO_COUNT2=$(find node_modules/llama.rn -name "*.so" 2>/dev/null | wc -l)
+            echo "手动下载后 .so 数量: $SO_COUNT2"
+            if [ "$SO_COUNT2" -eq 0 ]; then
+              echo "::error::llama.rn 没有原生 so 文件，构建会启动即崩。终止。"
+              exit 1
+            fi
+          fi
+          echo "=== arm64-v8a ==="
+          find node_modules/llama.rn -path "*arm64-v8a*" -name "*.so" | head -10
+
+      - name: Create .env
+        run: |
+          cat > .env <<'EOL'
+          FIREBASE_FUNCTIONS_URL=
+          SUPABASE_URL=
+          SUPABASE_ANON_KEY=
+          PALSHUB_API_BASE_URL=https://palshub.ai
+          APP_URL=pocketpal://app
+          ENABLE_PALSHUB_INTEGRATION=false
+          ENABLE_AUTHENTICATION=false
+          ENABLE_OFFLINE_MODE=true
+          GOOGLE_IOS_CLIENT_ID=
+          GOOGLE_WEB_CLIENT_ID=
+          EOL
+
+      - name: Ensure debug keystore
+        working-directory: android/app
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -l debug.keystore
+
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-v2-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+
+      - name: Build APK
+        working-directory: android
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/.gradle
+          GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g"
+        run: |
+          set -o pipefail
+          chmod +x ./gradlew
+          ./gradlew ${{ inputs.build_command }} --no-daemon --stacktrace 2>&1 | tail -200
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find android/app/build/outputs -name "*.apk" -print
+          find android/app/build/outputs -name "*.apk" -exec cp {} out/ \;
+          ls -lh out/
+
+      # 出包前最后一道保险：确认 APK 里真的含 libllama.so
+      - name: Verify APK contains libllama.so
+        run: |
+          APK=$(find out -name "*.apk" | head -1)
+          echo "检查: $APK"
+          unzip -l "$APK" | grep -i "\.so" | head -20
+          if unzip -l "$APK" | grep -qi "libllama"; then
+            echo "OK: APK 含 libllama.so"
+          else
+            echo "::error::APK 内没有 libllama.so，装上会崩。终止。"
+            exit 1
+          fi
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketpal-apk-temp5-v2
           path: out/*.apk
           retention-days: 30
           if-no-files-found: error
