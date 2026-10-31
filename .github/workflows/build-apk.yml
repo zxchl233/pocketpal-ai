@@ -1,0 +1,122 @@
+name: Build APK (custom)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_command:
+        description: "Gradle 构建命令"
+        required: true
+        default: "assembleProdRelease"
+        type: choice
+        options:
+          - assembleProdRelease
+          - assembleProdDebug
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      ORG_GRADLE_PROJECT_rnllamaBuildFromSource: "false"
+      RNLLAMA_SKIP_POSTINSTALL: "1"
+      PLUS_STORE_GATE: "false"
+
+    steps:
+      - name: Maximize build space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android/sdk/ndk \
+                      /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.21.0'
+
+      - name: Enable corepack (yarn)
+        run: |
+          corepack enable
+          corepack prepare yarn@1.22.22 --activate || true
+          yarn -v
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ runner.os }}-${{ hashFiles('yarn.lock', 'patches/**') }}
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile || yarn install
+
+      - name: Create .env
+        run: |
+          cat > .env <<'EOL'
+          FIREBASE_FUNCTIONS_URL=
+          SUPABASE_URL=
+          SUPABASE_ANON_KEY=
+          PALSHUB_API_BASE_URL=https://palshub.ai
+          APP_URL=pocketpal://app
+          ENABLE_PALSHUB_INTEGRATION=false
+          ENABLE_AUTHENTICATION=false
+          ENABLE_OFFLINE_MODE=true
+          GOOGLE_IOS_CLIENT_ID=
+          GOOGLE_WEB_CLIENT_ID=
+          EOL
+
+      - name: Ensure debug keystore
+        working-directory: android/app
+        run: |
+          if [ ! -f debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          ls -l debug.keystore
+
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+
+      - name: Build APK
+        working-directory: android
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/.gradle
+        run: |
+          set -o pipefail
+          chmod +x ./gradlew
+          ./gradlew ${{ inputs.build_command }} --no-daemon --stacktrace 2>&1 | tail -200
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find android/app/build/outputs -name "*.apk" -exec cp {} out/ \;
+          ls -lh out/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketpal-apk-temp5
+          path: out/*.apk
+          retention-days: 30
+          if-no-files-found: error
